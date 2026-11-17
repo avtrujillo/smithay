@@ -22,17 +22,6 @@ use wayland_server::{
     protocol::{wl_output::Transform, wl_surface::WlSurface},
 };
 
-// TEMPORARY A/B test hook (cosmic-sync-hang), not for upstream:
-// SMITHAY_NO_SYNC_TXID_FIX=1 restores the old per-commit txid bump for sync surfaces.
-fn sync_txid_fix_disabled() -> bool {
-    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DISABLED.get_or_init(|| {
-        let disabled = std::env::var_os("SMITHAY_NO_SYNC_TXID_FIX").is_some();
-        tracing::warn!(disabled, "cosmic-sync-hang: sync subsurface txid fix");
-        disabled
-    })
-}
-
 type CommitHook = dyn Fn(&mut dyn Any, &DisplayHandle, &WlSurface) + Send + Sync;
 type DestructionHook = dyn Fn(&mut dyn Any, &WlSurface) + Send + Sync;
 
@@ -326,19 +315,14 @@ impl PrivateSurfaceData {
             // applying one transaction can't pull in state from a later, still-blocked
             // commit.
             //
-            // A sync surface keeps its id until the parent takes its state (which
-            // bumps the id, see above and `commit_sync_surface_tree`), so consecutive
-            // commits merge in the cache. That merge is what releases a buffer that is
-            // replaced before it's ever applied. Without it, every commit to a sync
-            // subsurface holds on to its buffer until the parent commits, and a client
-            // whose parent commit waits on a free buffer (e.g. EGL with a fixed
-            // swapchain) deadlocks.
+            // A sync surface must keep its id until the parent takes its state (which
+            // bumps it, see above and `commit_sync_surface_tree`), so consecutive
+            // commits merge in the cache. Merging releases a buffer that was replaced
+            // before it was ever applied. Without it, every commit to a sync
+            // subsurface holds its buffer until the parent commits, and a client that
+            // needs a free buffer before it can commit the parent deadlocks.
             my_data.current_txid.0 = my_data.current_txid.0.wrapping_add(1);
-        } else if sync_txid_fix_disabled() {
-            // TEMPORARY A/B test hook (cosmic-sync-hang), not for upstream.
-            my_data.current_txid.0 = my_data.current_txid.0.wrapping_add(1);
-        }
-        if !is_sync {
+
             let client = match surface.client() {
                 Some(client) => client,
                 None => return,
